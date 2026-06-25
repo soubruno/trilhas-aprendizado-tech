@@ -1,194 +1,145 @@
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
+const parser = require('@babel/parser');
+const traverse = require('@babel/traverse').default;
 
 function analyzeCode(sourceCode) {
+  // Inicialização robusta de todas as métricas necessárias para as regras e perfil
+  const metrics = {
+    functionCount: 0,
+    arrowFunctionCount: 0,
+    asyncFunctionCount: 0,
+    varCount: 0,
+    letCount: 0,
+    constCount: 0,
+    consoleLogCount: 0,
+    tryCatchCount: 0,
+    ifCount: 0,
+    loopCount: 0,
+    maxNestingLevel: 0,
+    largeFunctions: [],
+    couplingCount: 0,
+    commentLinesCount: 0,
+    totalLinesCount: sourceCode.split('\n').length
+  };
 
-    const metrics = {
-        functionCount: 0,
-        arrowFunctionCount: 0,
-        asyncFunctionCount: 0,
+  try {
+    const ast = parser.parse(sourceCode, {
+      sourceType: 'module',
+      plugins: ['jsx', 'typescript', 'asyncGenerators', 'classProperties'],
+      attachComment: true
+    });
 
-        varCount: 0,
-        letCount: 0,
-        constCount: 0,
+    traverse(ast, {
+      // 1. Capturando funções comuns
+      FunctionDeclaration(path) {
+        metrics.functionCount++;
+        checkFunctionSize(path, metrics);
+      },
 
-        consoleLogCount: 0,
+      // 2. Capturando Arrow Functions
+      ArrowFunctionExpression(path) {
+        metrics.functionCount++;
+        metrics.arrowFunctionCount++;
+        checkFunctionSize(path, metrics);
+      },
 
-        tryCatchCount: 0,
+      // 3. Capturando declarações de variáveis
+      VariableDeclaration(path) {
+        if (path.node.kind === 'var') metrics.varCount++;
+        if (path.node.kind === 'let') metrics.letCount++;
+        if (path.node.kind === 'const') metrics.constCount++;
+      },
 
-        ifCount: 0,
-        loopCount: 0,
+      // 4. Capturando Acoplamento (Imports) e Console.logs/Requires
+      CallExpression(path) {
+        const { callee } = path.node;
 
-        maxNestingLevel: 0,
+        // CommonJS require (Acoplamento)
+        if (callee.type === 'Identifier' && callee.name === 'require') {
+          metrics.couplingCount++;
+        }
 
-        largeFunctions: [],
+        // Console.log
+        if (
+          callee.type === 'MemberExpression' &&
+          callee.object.type === 'Identifier' && callee.object.name === 'console' &&
+          callee.property.type === 'Identifier' && callee.property.name === 'log'
+        ) {
+          metrics.consoleLogCount++;
+        }
+      },
 
-        duplicatedStrings: {},
+      // 5. Capturando ES6 Imports (Acoplamento)
+      ImportDeclaration() {
+        metrics.couplingCount++;
+      },
 
-        averageFunctionSize: 0,
+      // 6. Estruturas de controle e cálculo de Nesting
+      IfStatement(path) {
+        metrics.ifCount++;
+        const nesting = getNestingLevel(path);
+        if (nesting > metrics.maxNestingLevel) {
+          metrics.maxNestingLevel = nesting;
+        }
+      },
 
-        functionSizes: []
-    };
+      TryStatement() {
+        metrics.tryCatchCount++;
+      },
 
-    try {
+      ForStatement() { metrics.loopCount++; },
+      WhileStatement() { metrics.loopCount++; },
 
-        const ast = parser.parse(sourceCode, {
-            sourceType: "module",
-            plugins: [
-                "jsx",
-                "asyncGenerators",
-                "classProperties"
-            ]
-        });
+      // 7. Contagem de comentários (Legibilidade)
+      enter(path) {
+        if (path.node.leadingComments) {
+          path.node.leadingComments.forEach(comment => {
+            const lines = comment.value.split('\n').length;
+            metrics.commentLinesCount += lines;
+          });
+          path.node.leadingComments = null; // Evita contagem duplicada no traverse
+        }
+      }
+    });
 
-        traverse(ast, {
+  } catch (error) {
+    console.error("Erro ao processar AST no parser:", error);
+  }
 
-            FunctionDeclaration(path) {
+  // Cálculos pós-análise estrutural
+  metrics.commentRatio = metrics.totalLinesCount > 0 
+    ? parseFloat((metrics.commentLinesCount / metrics.totalLinesCount).toFixed(2))
+    : 0;
 
-                metrics.functionCount++;
-
-                analyzeFunction(path, metrics);
-            },
-
-            ArrowFunctionExpression(path) {
-
-                metrics.functionCount++;
-                metrics.arrowFunctionCount++;
-
-                analyzeFunction(path, metrics);
-            },
-
-            VariableDeclaration(path) {
-
-                if (path.node.kind === "var") {
-                    metrics.varCount++;
-                }
-
-                if (path.node.kind === "let") {
-                    metrics.letCount++;
-                }
-
-                if (path.node.kind === "const") {
-                    metrics.constCount++;
-                }
-            },
-
-            CallExpression(path) {
-
-                const callee = path.node.callee;
-
-                if (
-                    callee.type === "MemberExpression" &&
-                    callee.object &&
-                    callee.object.type === "Identifier" &&
-                    callee.object.name === "console"
-                ) {
-                    metrics.consoleLogCount++;
-                }
-            },
-
-            TryStatement() {
-                metrics.tryCatchCount++;
-            },
-
-            IfStatement(path) {
-
-                metrics.ifCount++;
-
-                const nesting = getNestingLevel(path);
-
-                if (nesting > metrics.maxNestingLevel) {
-                    metrics.maxNestingLevel = nesting;
-                }
-            },
-
-            ForStatement() {
-                metrics.loopCount++;
-            },
-
-            WhileStatement() {
-                metrics.loopCount++;
-            },
-
-            StringLiteral(path) {
-
-                const value = path.node.value;
-
-                if (!metrics.duplicatedStrings[value]) {
-                    metrics.duplicatedStrings[value] = 1;
-                } else {
-                    metrics.duplicatedStrings[value]++;
-                }
-            }
-        });
-
-        calculateAverageFunctionSize(metrics);
-
-        return metrics;
-
-    } catch (error) {
-
-        console.error("Erro ao analisar código:", error);
-
-        return metrics;
-    }
+  return metrics;
 }
 
-function analyzeFunction(path, metrics) {
+// Funções auxiliares para medição de tamanho e escopo
+function checkFunctionSize(path, metrics) {
+  const start = path.node.loc?.start?.line || 0;
+  const end = path.node.loc?.end?.line || 0;
+  const size = end - start;
 
-    const start = path.node.loc?.start?.line || 0;
-    const end = path.node.loc?.end?.line || 0;
-
-    const size = end - start;
-
-    metrics.functionSizes.push(size);
-
-    if (size >= 15) {
-
-        metrics.largeFunctions.push({
-            name: path.node.id?.name || "Função anônima",
-            size
-        });
-    }
-
-    if (path.node.async) {
-        metrics.asyncFunctionCount++;
-    }
-}
-
-function calculateAverageFunctionSize(metrics) {
-
-    if (metrics.functionSizes.length === 0) {
-        metrics.averageFunctionSize = 0;
-        return;
-    }
-
-    const total = metrics.functionSizes.reduce((a, b) => a + b, 0);
-
-    metrics.averageFunctionSize =
-        Math.round(total / metrics.functionSizes.length);
+  if (size >= 15) {
+    metrics.largeFunctions.push({
+      name: path.node.id?.name || "Função anônima",
+      size
+    });
+  }
+  if (path.node.async) {
+    metrics.asyncFunctionCount++;
+  }
 }
 
 function getNestingLevel(path) {
-
-    let level = 0;
-
-    let current = path.parentPath;
-
-    while (current) {
-
-        if (
-            current.isIfStatement() ||
-            current.isForStatement() ||
-            current.isWhileStatement()
-        ) {
-            level++;
-        }
-
-        current = current.parentPath;
+  let level = 0;
+  let current = path.parentPath;
+  while (current) {
+    if (current.isIfStatement() || current.isForStatement() || current.isWhileStatement()) {
+      level++;
     }
-
-    return level;
+    current = current.parentPath;
+  }
+  return level;
 }
 
 module.exports = { analyzeCode };
